@@ -16,7 +16,9 @@ package org.tensorflow.framework.losses;
 
 import static org.tensorflow.framework.utils.CastHelper.cast;
 
+import org.tensorflow.GraphOperation;
 import org.tensorflow.Operand;
+import org.tensorflow.Operation;
 import org.tensorflow.framework.losses.impl.LossTuple;
 import org.tensorflow.framework.losses.impl.LossesHelper;
 import org.tensorflow.framework.op.FrameworkOps;
@@ -25,8 +27,11 @@ import org.tensorflow.op.Ops;
 import org.tensorflow.op.core.ReduceAll;
 import org.tensorflow.op.core.ReduceMax;
 import org.tensorflow.op.core.ReduceSum;
+import org.tensorflow.op.core.Identity;
 import org.tensorflow.op.math.Mean;
+import org.tensorflow.op.math.Sigmoid;
 import org.tensorflow.op.math.Softplus;
+import org.tensorflow.op.nn.Softmax;
 import org.tensorflow.types.TBool;
 import org.tensorflow.types.TInt64;
 import org.tensorflow.types.family.TNumber;
@@ -187,18 +192,17 @@ public class Losses {
       return ftf.nn.sigmoidCrossEntropyWithLogits(target, output);
     }
 
-    /* TODO - skip this logic for now. It requires walking back the inputs which is not yet possible
-    if (!(output instanceof Variable) && (!tf.scope().env().isEager())) {
-      // TODO - this does not work
-      // TODO output = backtrackIdentity(output);
-      // TODO if (output.op().type().equals(Sigmoid.OP_NAME)) {
-      // TODO   if (output.op().numInputess() != 1)
-      // TODO     throw new IllegalArgumentException("output can only have 1 output");
-      // TODO   output = output.op().inout(0);
-       // TODO   return tf.nn.sigmoidCrossEntropyWithLogits(target, output);
-      // TODO}
+    if (!tf.scope().env().isEager()) {
+      Operand<T> backtrackedOutput = backtrackIdentity(output);
+      Operation op = backtrackedOutput.asOutput().op();
+      if (op.type().equals(Sigmoid.OP_NAME)) {
+        if (op instanceof GraphOperation) {
+          GraphOperation graphOp = (GraphOperation) op;
+          output = (Operand<T>) graphOp.input(0);
+          return ftf.nn.sigmoidCrossEntropyWithLogits(target, output);
+        }
+      }
     }
-    */
 
     Class<T> outputType = output.type();
     Operand<T> one = cast(tf, tf.constant(1), outputType);
@@ -252,18 +256,17 @@ public class Losses {
     if (fromLogits) {
       return ftf.nn.softmaxCrossEntropyWithLogits(tLabels, predictions, axis);
     }
-    /* TODO
-    if (!(predictions instanceof Variable) && (!tf.scope().env().isEager())) {
-
-      // TODO output = backtrackIdentity(output); doesn't seem to work with Java version.
-      if (predictions.op().type().equals("Softmax")) {
-        if (predictions.op().numOutputs() != 1)
-          throw new IllegalArgumentException("output can only have 1 output");
-        predictions = predictions.op().output(0);
-        return tf.nn.softmaxCrossEntropyWithLogits(tLabels, predictions, -1);
+    if (!tf.scope().env().isEager()) {
+      Operand<T> backtrackedPredictions = backtrackIdentity(predictions);
+      Operation op = backtrackedPredictions.asOutput().op();
+      if (op.type().equals(Softmax.OP_NAME)) {
+        if (op instanceof GraphOperation) {
+          GraphOperation graphOp = (GraphOperation) op;
+          predictions = (Operand<T>) graphOp.input(0);
+          return ftf.nn.softmaxCrossEntropyWithLogits(tLabels, predictions, axis);
+        }
       }
     }
-    */
 
     Operand<T> one = cast(tf, tf.constant(1), predictionType);
     Operand<T> epsilonConst = cast(tf, tf.constant(EPSILON), predictionType);
@@ -526,22 +529,17 @@ public class Losses {
     Operand<T> one = cast(tf, tf.constant(1), predictionType);
     Operand<T> oneMinusEpsilonConst = tf.math.sub(one, epsilonConst);
 
-    /* TODO need ability to walk back inputs
-    if (!fromLogits && !(predictions instanceof Variable) && (!tf.scope().env().isEager())) {
-      // TODO output = backtrackIdentity(output); doesn't seem to work with Java version.
-      /* TODO
-      if (predictions.op().type().equals(Softmax.OP_NAME)) {
-        // When softmax activation function is used for output operation, we
-        // use logits from the softmax function directly to compute loss in order
-        // to prevent collapsing zero when training.
-        // TODO  if( output.op().numOutputs() != 1)
-        //          throw new IllegalArgumentException("output can only have 1 output");
-        // TODO output = output.op.inputs[0]
-        fromLogits = true;
+    if (!fromLogits && !tf.scope().env().isEager()) {
+      Operand<T> backtrackedPredictions = backtrackIdentity(predictions);
+      Operation op = backtrackedPredictions.asOutput().op();
+      if (op.type().equals(Softmax.OP_NAME)) {
+        if (op instanceof GraphOperation) {
+          GraphOperation graphOp = (GraphOperation) op;
+          predictions = (Operand<T>) graphOp.input(0);
+          fromLogits = true;
+        }
       }
-
     }
-     */
     if (!fromLogits) {
 
       predictions = tf.clipByValue(predictions, epsilonConst, oneMinusEpsilonConst);
@@ -711,5 +709,21 @@ public class Losses {
     }
     axisNew[outputRank - 1] = axis;
     return axisNew;
+  }
+
+  private static <T extends TNumber> Operand<T> backtrackIdentity(Operand<T> output) {
+    Operand<T> current = output;
+    while (true) {
+      Operation op = current.asOutput().op();
+      if (!op.type().equals(Identity.OP_NAME)) {
+        break;
+      }
+      if (!(op instanceof GraphOperation)) {
+        break;
+      }
+      GraphOperation graphOp = (GraphOperation) op;
+      current = (Operand<T>) graphOp.input(0);
+    }
+    return current;
   }
 }
